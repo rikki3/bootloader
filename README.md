@@ -1,31 +1,31 @@
 # Bootloader
 
-This project produces two different binary artifacts:
+This is a small BIOS bootloader project for x86.
 
-- `boot.bin`: the 512-byte stage 1 boot sector assembled from `boot.asm`
-- `build/disk.img`: the full bootable raw disk image that includes stage 1, stage 2, and the kernel
+The boot process is split into parts:
 
-If you want to write the project to a USB stick with Rufus, use `build/disk.img`. `boot.bin` on its own is not enough for the full boot flow.
+- `boot.asm` is stage 1, the very first boot sector
+- `boot/stage2.asm` is stage 2, which does more setup and loads the kernel
+- `kernel/main.c` is the freestanding kernel code that runs after the bootloader
 
-## Build on Windows
+## Build and write to USB
 
-From PowerShell:
+Run:
 
 ```powershell
-.\build.ps1 stage1
 .\build.ps1 image
 ```
 
-The default target is `image`, so `.\build.ps1` also builds `build/disk.img`.
+This creates `build/disk.img`, which is the full bootable image.
 
-`build.ps1` expects MSYS2 tools under `%LOCALAPPDATA%\msys64`. If yours is elsewhere, set `MSYS2_ROOT` first.
+Write `build/disk.img` to the USB with Rufus. If Rufus asks, choose raw or DD image mode.
 
-## Git
+By default, `build.ps1` looks for MSYS2 in `%LOCALAPPDATA%\msys64`.
+If your MSYS2 installation is somewhere else, set the `MSYS2_ROOT` environment variable before running the script.
 
-Initialize the repository and create the first commit:
+Example:
 
 ```powershell
-git init
-git add .
-git commit -m "Initial import"
+$env:MSYS2_ROOT = "C:\msys64"
+.\build.ps1 image
 ```
