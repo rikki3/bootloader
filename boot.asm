@@ -3,6 +3,9 @@
 
 %define STAGE2_LOAD_OFFSET 0x8000
 %define STAGE2_SECTORS     128
+%define STAGE2_FIRST_SECTORS  64
+%define STAGE2_SECOND_SECTORS (STAGE2_SECTORS - STAGE2_FIRST_SECTORS)
+%define STAGE2_SECOND_SEGMENT 0x1000
 %define FAT32_LBA_START    2048
 %define IMAGE_SECTORS      131072
 %define PARTITION_SECTORS  (IMAGE_SECTORS - FAT32_LBA_START)
@@ -23,10 +26,23 @@ start:
     mov si, msg_loading
     call print_string
 
-    mov word [disk_packet.sector_count], STAGE2_SECTORS
+    ; Keep each BIOS transfer within a 64 KiB boundary for hardware compatibility.
+    mov word [disk_packet.sector_count], STAGE2_FIRST_SECTORS
     mov word [disk_packet.buffer_offset], STAGE2_LOAD_OFFSET
     mov word [disk_packet.buffer_segment], 0
     mov dword [disk_packet.lba_low], 1
+    mov dword [disk_packet.lba_high], 0
+
+    mov si, disk_packet
+    mov dl, [boot_drive]
+    mov ah, 0x42
+    int 0x13
+    jc disk_error
+
+    mov word [disk_packet.sector_count], STAGE2_SECOND_SECTORS
+    mov word [disk_packet.buffer_offset], 0
+    mov word [disk_packet.buffer_segment], STAGE2_SECOND_SEGMENT
+    mov dword [disk_packet.lba_low], 1 + STAGE2_FIRST_SECTORS
     mov dword [disk_packet.lba_high], 0
 
     mov si, disk_packet

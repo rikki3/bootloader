@@ -19,6 +19,7 @@
 %define BOOTINFO_SIZE       96
 %define FAT32_EOC           0x0FFFFFF8
 %define FAT32_PARTITION_LBA 2048
+%define AUTOBOOT_TICKS      273
 
 start:
     cli
@@ -130,7 +131,7 @@ autoboot_or_shell:
 
     mov ax, [0x046C]
     sub ax, bx
-    cmp ax, 36
+    cmp ax, AUTOBOOT_TICKS
     jb .wait
 
     mov si, msg_autobooting
@@ -1214,7 +1215,7 @@ disk_packet:
 banner db 'stage2: shell ready', 13, 10, 0
 prompt db '> ', 0
 msg_unknown db 'unknown command', 13, 10, 0
-msg_autoboot db 'Press any key for shell. Autoboot in 2 seconds...', 13, 10, 0
+msg_autoboot db 'Press any key for shell. Autoboot in 15 seconds...', 13, 10, 0
 msg_autobooting db 'Autobooting kernel...', 13, 10, 0
 msg_shell db 'Interactive shell enabled.', 13, 10, 0
 msg_kernel_load db 'Loading /BOOT/KERNEL.ELF...', 13, 10, 0

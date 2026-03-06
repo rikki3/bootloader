@@ -70,6 +70,12 @@ static void hex64(uint64_t value) {
     hex32((uint32_t)value);
 }
 
+static void halt_forever(void) {
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+
 void kernel_main(const BootInfo* info) {
     serial_init();
     clear_screen();
@@ -78,7 +84,8 @@ void kernel_main(const BootInfo* info) {
 
     if (!info || info->magic != BOOTINFO_MAGIC) {
         puts("kernel: invalid boot info\r\n");
-        return;
+        puts("kernel: halting\r\n");
+        halt_forever();
     }
 
     puts("kernel: boot info version 0x");
@@ -108,4 +115,7 @@ void kernel_main(const BootInfo* info) {
     puts("kernel: acpi rsdp 0x");
     hex64(info->acpi_rsdp);
     puts("\r\n");
+
+    puts("kernel: init complete, halting\r\n");
+    halt_forever();
 }
