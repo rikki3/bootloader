@@ -1,6 +1,6 @@
-# Bootloader
+# bootloader-doom
 
-This is a small BIOS bootloader project for x86.
+This is a small BIOS bootloader project for x86 that boots a freestanding Doom port.
 
 The boot process is split into parts:
 
@@ -9,6 +9,9 @@ The boot process is split into parts:
 - `kernel/main.c` is the freestanding kernel code that runs after the bootloader
 
 ## Build and write to USB
+
+Before building, place your local Doom II IWAD at `assets/DOOM2.WAD`.
+That file is intentionally ignored and is not included in the repository.
 
 Run:
 

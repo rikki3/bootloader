@@ -1,5 +1,10 @@
 /build/
 /boot.bin
+/boot/KERNEL.ELF
 /NUL
+/DOOM2.WAD
+/assets/DOOM2.WAD
+/.tmp_doomgeneric.zip
+/.tmp_doomgeneric/
 Thumbs.db
 .DS_Store

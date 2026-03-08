@@ -2,24 +2,30 @@
 [ORG 0x8000]
 
 %define COM1                0x3F8
-%define KERNEL_FILE_SEG     0x2000
-%define KERNEL_FILE_OFFSET  0x0000
-%define KERNEL_FILE_PHYS    0x20000
-%define KERNEL_FILE_MAX_SIZE 0x00070000
-%define KERNEL_LOAD_SEG     0x2100
-%define KERNEL_LOAD_PHYS    0x00021000
-%define KERNEL_LOAD_OFFSET  0x0000
+%define KERNEL_FILE_PHYS    0x00020000
+%define KERNEL_FILE_MAX_SIZE 0x000E0000
+%define KERNEL_LOAD_PHYS    0x00201000
+%define VGA_FB_PHYS         0x000A0000
+%define VGA_WIDTH           320
+%define VGA_HEIGHT          200
+%define VGA_PITCH           320
+%define VGA_BPP             8
+%define MAX_BOOT_PHYS       0x08000000
 %define PAGE_TABLE_PML4     0x1000
 %define PAGE_TABLE_PDPT     0x2000
 %define PAGE_TABLE_PD       0x3000
 %define E820_ENTRY_SIZE     24
 %define E820_MAX_ENTRIES    64
 %define BOOTINFO_MAGIC      0x31544942
-%define BOOTINFO_VERSION    1
-%define BOOTINFO_SIZE       96
+%define BOOTINFO_VERSION    2
+%define BOOTINFO_SIZE       112
 %define FAT32_EOC           0x0FFFFFF8
 %define FAT32_PARTITION_LBA 2048
 %define AUTOBOOT_TICKS      273
+%define WAD_METADATA_LBA    129
+%define WAD_METADATA_MAGIC  0x4D444157
+%define WAD_BOUNCE_PHYS     0x00004000
+%define WAD_BOUNCE_SECTORS  32
 
 start:
     cli
@@ -147,6 +153,16 @@ autoboot_or_shell:
     ret
 
 boot_kernel:
+    mov si, msg_wad_load
+    call puts
+    call prepare_wad_from_fat32
+    jc .fail
+
+    call copy_wad_from_fat32
+    jc .fail
+    mov si, msg_step_wad_loaded
+    call puts_serial_only
+
     mov si, msg_kernel_load
     call puts
     call load_kernel_from_fat32
@@ -161,6 +177,8 @@ boot_kernel:
 
     mov si, msg_kernel_jump
     call puts
+    mov ax, 0x0013
+    int 0x10
     cli
     call enter_long_mode
     jmp $
@@ -210,6 +228,371 @@ load_kernel_from_fat32:
     call puts
 .fail:
     stc
+    ret
+
+prepare_wad_from_fat32:
+    mov dword [wad_start_lba], 0
+    mov dword [wad_file_size], 0
+    call load_wad_metadata
+    jc prepare_wad_metadata_fail
+    mov si, msg_step_wad_found
+    call puts_serial_only
+
+    call validate_wad_header
+    jc prepare_wad_invalid
+
+    call select_wad_load_region
+    jc prepare_wad_no_mem
+
+    clc
+    ret
+
+copy_wad_from_fat32:
+    mov eax, [wad_start_lba]
+    test eax, eax
+    jz .copy_not_ready
+    mov word [wad_progress_sectors], 0
+    mov si, msg_wad_copying
+    call puts
+    mov eax, [wad_start_lba]
+
+    call load_wad_from_disk_to_high_memory
+    jc copy_wad_fail
+
+    mov eax, [wad_load_phys]
+    mov [boot_info + 96], eax
+    mov dword [boot_info + 100], 0
+    mov eax, [wad_file_size]
+    mov [boot_info + 104], eax
+    mov dword [boot_info + 108], 0
+    clc
+    ret
+
+.copy_not_ready:
+    mov si, msg_wad_not_ready
+    call puts
+    stc
+    ret
+
+prepare_wad_metadata_fail:
+    mov si, msg_wad_metadata_fail
+    call puts
+    stc
+    ret
+
+prepare_wad_invalid:
+    mov si, msg_wad_invalid
+    call puts
+    stc
+    ret
+
+prepare_wad_no_mem:
+    mov si, msg_wad_no_mem
+    call puts
+    stc
+    ret
+
+copy_wad_fail:
+    mov si, msg_wad_fail
+    call puts
+    stc
+    ret
+
+load_wad_metadata:
+    pushad
+    push es
+    xor ax, ax
+    mov es, ax
+    mov eax, WAD_METADATA_LBA
+    mov cx, 1
+    mov bx, sector_buffer
+    call read_lba
+    pop es
+    jc .fail
+
+    cmp dword [sector_buffer + 0], WAD_METADATA_MAGIC
+    jne .fail
+
+    mov eax, [sector_buffer + 4]
+    test eax, eax
+    jz .fail
+    mov [wad_start_lba], eax
+
+    mov eax, [sector_buffer + 8]
+    cmp eax, 12
+    jb .fail
+    mov [wad_file_size], eax
+
+    popad
+    clc
+    ret
+
+.fail:
+    popad
+    stc
+    ret
+
+validate_wad_header:
+    pushad
+    push es
+    xor ax, ax
+    mov es, ax
+    mov eax, [wad_start_lba]
+    mov cx, 1
+    mov bx, sector_buffer
+    call read_lba
+    pop es
+    jc .fail
+
+    mov al, [sector_buffer + 0]
+    cmp al, 'I'
+    je .check_rest
+    cmp al, 'P'
+    jne .fail
+
+.check_rest:
+    cmp byte [sector_buffer + 1], 'W'
+    jne .fail
+    cmp byte [sector_buffer + 2], 'A'
+    jne .fail
+    cmp byte [sector_buffer + 3], 'D'
+    jne .fail
+
+    mov eax, [sector_buffer + 4]
+    test eax, eax
+    jz .fail
+    mov ecx, 16
+    mul ecx
+    jc .fail
+    add eax, [sector_buffer + 8]
+    jc .fail
+    cmp eax, [wad_file_size]
+    ja .fail
+
+    popad
+    clc
+    ret
+
+.fail:
+    popad
+    stc
+    ret
+
+select_wad_load_region:
+    pushad
+    xor ebx, ebx
+    xor si, si
+    mov ecx, [wad_file_size]
+    add ecx, 0x0FFF
+    and ecx, 0xFFFFF000
+
+.entry_loop:
+    cmp si, [e820_count]
+    jae .done
+
+    mov ax, si
+    mov dx, E820_ENTRY_SIZE
+    mul dx
+    mov di, e820_entries
+    add di, ax
+
+    cmp dword [di + 16], 1
+    jne .next
+    cmp dword [di + 4], 0
+    jne .next
+    cmp dword [di + 12], 0
+    jne .next
+
+    mov eax, [di + 0]
+    cmp eax, MAX_BOOT_PHYS
+    jae .next
+    cmp eax, 0x00100000
+    jae .have_start
+    mov eax, 0x00100000
+
+.have_start:
+    mov edx, [di + 0]
+    add edx, [di + 8]
+    jc .cap_end
+    cmp edx, MAX_BOOT_PHYS
+    jbe .have_end
+
+.cap_end:
+    mov edx, MAX_BOOT_PHYS
+
+.have_end:
+    cmp edx, eax
+    jbe .next
+
+    mov ebp, edx
+    sub ebp, ecx
+    jc .next
+    and ebp, 0xFFFFF000
+    cmp ebp, eax
+    jb .next
+    cmp ebp, ebx
+    jbe .next
+    mov ebx, ebp
+
+.next:
+    inc si
+    jmp .entry_loop
+
+.done:
+    mov [wad_load_phys], ebx
+    popad
+    cmp dword [wad_load_phys], 0
+    jz .fail
+    clc
+    ret
+
+.fail:
+    stc
+    ret
+
+load_wad_from_disk_to_high_memory:
+    pushad
+    mov [wad_current_lba], eax
+    mov eax, [wad_file_size]
+    mov [bytes_remaining], eax
+    mov eax, [wad_load_phys]
+    mov [high_copy_dest], eax
+
+.read_sectors:
+    mov eax, [bytes_remaining]
+    test eax, eax
+    jz .done
+
+    mov ecx, eax
+    add ecx, 511
+    shr ecx, 9
+    cmp ecx, WAD_BOUNCE_SECTORS
+    jbe .have_sector_count
+    mov ecx, WAD_BOUNCE_SECTORS
+
+.have_sector_count:
+    mov eax, ecx
+    shl eax, 9
+    cmp eax, [bytes_remaining]
+    jbe .have_copy_bytes
+    mov eax, [bytes_remaining]
+
+.have_copy_bytes:
+    mov [copy_bytes], eax
+
+    push es
+    xor ax, ax
+    mov es, ax
+    mov eax, [wad_current_lba]
+    mov bx, WAD_BOUNCE_PHYS
+    call read_lba
+    pop es
+    jc .fail
+
+    mov dword [low_copy_source], WAD_BOUNCE_PHYS
+    call copy_sector_buffer_to_high_memory
+    mov eax, [bytes_remaining]
+    sub eax, [copy_bytes]
+    mov [bytes_remaining], eax
+    movzx eax, cx
+    add [wad_current_lba], eax
+    add [wad_progress_sectors], cx
+    mov ax, [wad_progress_sectors]
+    test ax, 0x00FF
+    jnz .skip_progress
+    mov al, '.'
+    call putc
+.skip_progress:
+    jmp .read_sectors
+
+.done:
+    cmp word [wad_progress_sectors], 0
+    je .no_newline
+    call newline
+.no_newline:
+    popad
+    clc
+    ret
+
+.fail:
+    popad
+    stc
+    ret
+
+copy_sector_buffer_to_high_memory:
+    pushad
+    pushf
+    cmp byte [copy_debug_state], 0
+    jne .skip_copy_msg
+    mov si, msg_step_copy_sector
+    call puts_serial_only
+    mov byte [copy_debug_state], 1
+.skip_copy_msg:
+    call enter_unreal_mode
+    cmp byte [copy_debug_state], 1
+    jne .skip_unreal_msg
+    mov si, msg_step_copy_unreal
+    call puts_serial_only
+    mov byte [copy_debug_state], 2
+.skip_unreal_msg:
+    xor ax, ax
+    mov ds, ax
+    mov esi, [low_copy_source]
+    mov edi, [high_copy_dest]
+    mov ecx, [copy_bytes]
+    mov ebx, ecx
+    shr ecx, 2
+
+.copy_dwords:
+    test ecx, ecx
+    jz .copy_bytes
+    mov eax, [esi]
+    mov [gs:edi], eax
+    add esi, 4
+    add edi, 4
+    dec ecx
+    jmp .copy_dwords
+
+.copy_bytes:
+    mov ecx, ebx
+    and ecx, 3
+
+.copy_byte_loop:
+    test ecx, ecx
+    jz .done
+    mov al, [esi]
+    mov [gs:edi], al
+    inc esi
+    inc edi
+    dec ecx
+    jmp .copy_byte_loop
+
+.done:
+    mov [high_copy_dest], edi
+    xor ax, ax
+    mov gs, ax
+    popf
+    popad
+    ret
+
+enter_unreal_mode:
+    cli
+    lgdt [unreal_gdt_descriptor]
+    mov eax, cr0
+    or eax, 1
+    mov cr0, eax
+    jmp 0x0008:unreal_mode_pm
+
+unreal_mode_pm:
+    mov ax, 0x10
+    mov gs, ax
+    mov eax, cr0
+    and eax, 0xFFFFFFFE
+    mov cr0, eax
+    jmp 0x0000:unreal_mode_rm
+
+unreal_mode_rm:
+unreal_mode_done:
     ret
 
 ensure_fat32_ready:
@@ -384,6 +767,12 @@ init_boot_info:
     mov dword [boot_info + 12], 0
     mov dword [boot_info + 16], e820_entries
     mov dword [boot_info + 20], 0
+    mov dword [boot_info + 24], VGA_FB_PHYS
+    mov dword [boot_info + 28], 0
+    mov dword [boot_info + 32], VGA_WIDTH
+    mov dword [boot_info + 36], VGA_HEIGHT
+    mov dword [boot_info + 40], VGA_PITCH
+    mov dword [boot_info + 44], VGA_BPP
     mov dword [boot_info + 48], 0
     mov dword [boot_info + 52], 0
     mov eax, FAT32_PARTITION_LBA
@@ -395,6 +784,10 @@ init_boot_info:
     mov dword [boot_info + 84], 0
     mov dword [boot_info + 88], 0
     mov dword [boot_info + 92], 0
+    mov dword [boot_info + 96], 0
+    mov dword [boot_info + 100], 0
+    mov dword [boot_info + 104], 0
+    mov dword [boot_info + 108], 0
     movzx eax, byte [boot_drive]
     mov [boot_info + 48], eax
     ret
@@ -564,6 +957,7 @@ fat32_init:
 
 fat32_find_entry:
     pushad
+    mov byte [fat32_find_error], 1
     mov [search_name_ptr], si
     mov [search_cluster], eax
 
@@ -571,19 +965,20 @@ fat32_find_entry:
     mov eax, [search_cluster]
     call cluster_to_lba
     mov [cluster_lba_cache], eax
-    xor dx, dx
+    xor edx, edx
 
 .sector_loop:
     push es
     xor ax, ax
     mov es, ax
+    movzx edx, dx
     mov eax, [cluster_lba_cache]
     add eax, edx
     mov cx, 1
     mov bx, sector_buffer
     call read_lba
     pop es
-    jc .not_found
+    jc .read_fail
 
     xor di, di
 .entry_loop:
@@ -610,12 +1005,16 @@ fat32_find_entry:
 
     mov al, [sector_buffer + di + 11]
     mov [found_attr], al
-    mov ax, [sector_buffer + di + 20]
-    shl eax, 16
+    xor eax, eax
+    xor edx, edx
+    mov dx, [sector_buffer + di + 20]
+    shl edx, 16
     mov ax, [sector_buffer + di + 26]
+    or eax, edx
     mov [found_cluster], eax
     mov eax, [sector_buffer + di + 28]
     mov [found_size], eax
+    mov byte [fat32_find_error], 0
     popad
     clc
     ret
@@ -635,10 +1034,22 @@ fat32_find_entry:
 
     mov eax, [search_cluster]
     call fat32_next_cluster
-    jc .not_found
+    jc .chain_fail
     mov [search_cluster], eax
     cmp eax, FAT32_EOC
     jb .cluster_loop
+
+.read_fail:
+    mov byte [fat32_find_error], 2
+    popad
+    stc
+    ret
+
+.chain_fail:
+    mov byte [fat32_find_error], 3
+    popad
+    stc
+    ret
 
 .not_found:
     popad
@@ -650,13 +1061,13 @@ fat32_load_file:
     mov [load_cluster], eax
     mov eax, [kernel_file_size]
     mov [bytes_remaining], eax
-    mov word [load_segment], KERNEL_FILE_SEG
+    mov word [load_segment], 0x2000
 
 .cluster_loop:
     mov eax, [load_cluster]
     call cluster_to_lba
     mov [cluster_lba_cache], eax
-    xor dx, dx
+    xor edx, edx
 
 .read_sectors:
     mov eax, [bytes_remaining]
@@ -665,6 +1076,7 @@ fat32_load_file:
 
     mov ax, [load_segment]
     mov es, ax
+    movzx edx, dx
     mov eax, [cluster_lba_cache]
     add eax, edx
     mov cx, 1
@@ -709,6 +1121,73 @@ fat32_load_file:
     stc
     ret
 
+fat32_load_kernel_to_high_memory:
+    pushad
+    mov si, msg_step_kernel_copy_start
+    call puts_serial_only
+    mov [load_cluster], eax
+    mov eax, [kernel_file_size]
+    mov [bytes_remaining], eax
+    mov dword [high_copy_dest], KERNEL_FILE_PHYS
+
+.cluster_loop:
+    mov eax, [load_cluster]
+    call cluster_to_lba
+    mov [cluster_lba_cache], eax
+    xor edx, edx
+
+.read_sectors:
+    mov eax, [bytes_remaining]
+    test eax, eax
+    jz .done
+
+    push es
+    xor ax, ax
+    mov es, ax
+    movzx edx, dx
+    mov eax, [cluster_lba_cache]
+    add eax, edx
+    mov cx, 1
+    mov bx, sector_buffer
+    call read_lba
+    pop es
+    jc .fail
+
+    mov eax, [bytes_remaining]
+    cmp eax, 512
+    jbe .short_copy
+    mov eax, 512
+
+.short_copy:
+    mov [copy_bytes], eax
+    mov dword [low_copy_source], sector_buffer
+    call copy_sector_buffer_to_high_memory
+    mov eax, [bytes_remaining]
+    sub eax, [copy_bytes]
+    mov [bytes_remaining], eax
+
+    inc dx
+    movzx ax, byte [sectors_per_cluster]
+    cmp dx, ax
+    jb .read_sectors
+
+    mov eax, [load_cluster]
+    call fat32_next_cluster
+    jc .done
+    mov [load_cluster], eax
+    cmp eax, FAT32_EOC
+    jb .cluster_loop
+
+.done:
+    popad
+    clc
+    ret
+
+.fail:
+    popad
+    stc
+    ret
+
 fat32_list_directory:
     pushad
     mov [search_cluster], eax
@@ -717,12 +1196,13 @@ fat32_list_directory:
     mov eax, [search_cluster]
     call cluster_to_lba
     mov [cluster_lba_cache], eax
-    xor dx, dx
+    xor edx, edx
 
 .sector_loop:
     push es
     xor ax, ax
     mov es, ax
+    movzx edx, dx
     mov eax, [cluster_lba_cache]
     add eax, edx
     mov cx, 1
@@ -876,21 +1356,18 @@ cluster_to_lba:
 
 load_elf64:
     pushad
-    push es
-    mov ax, KERNEL_FILE_SEG
-    mov es, ax
-
-    cmp dword [es:KERNEL_FILE_OFFSET], 0x464C457F
+    mov edi, KERNEL_FILE_PHYS
+    cmp dword [edi], 0x464C457F
     jne .bad_header
-    cmp byte [es:KERNEL_FILE_OFFSET + 4], 2
+    cmp byte [edi + 4], 2
     jne .bad_header
-    cmp word [es:KERNEL_FILE_OFFSET + 18], 0x3E
+    cmp word [edi + 18], 0x3E
     jne .bad_header
 
-    mov esi, [es:KERNEL_FILE_OFFSET + 24]
-    mov ebx, [es:KERNEL_FILE_OFFSET + 32]
-    movzx ecx, word [es:KERNEL_FILE_OFFSET + 54]
-    movzx edx, word [es:KERNEL_FILE_OFFSET + 56]
+    mov esi, [edi + 24]
+    mov ebx, [edi + 32]
+    movzx ecx, word [edi + 54]
+    movzx edx, word [edi + 56]
     cmp edx, 1
     jb .bad_header
     cmp ecx, 56
@@ -898,22 +1375,30 @@ load_elf64:
     cmp ebx, [kernel_file_size]
     jae .bad_header
 
-    mov eax, [es:ebx + KERNEL_FILE_OFFSET + 8]
+    lea edx, [edi + ebx]
+    mov eax, [edx + 8]
     cmp eax, 0x1000
     jne .bad_header
 
-    cmp dword [es:ebx + KERNEL_FILE_OFFSET + 0], 1
+    cmp dword [edx + 0], 1
     jne .bad_header
-    cmp dword [es:ebx + KERNEL_FILE_OFFSET + 24], KERNEL_LOAD_PHYS
+    cmp dword [edx + 24], KERNEL_LOAD_PHYS
     jne .bad_header
 
-    mov eax, [es:ebx + KERNEL_FILE_OFFSET + 8]
-    add eax, [es:ebx + KERNEL_FILE_OFFSET + 32]
+    mov eax, [edx + 8]
+    add eax, [edx + 32]
     jc .bad_header
     cmp eax, [kernel_file_size]
     ja .bad_header
 
-    pop es
+    mov eax, [edx + 8]
+    add eax, KERNEL_FILE_PHYS
+    mov [low_copy_source], eax
+    mov dword [high_copy_dest], KERNEL_LOAD_PHYS
+    mov eax, [edx + 32]
+    mov [copy_bytes], eax
+    call copy_sector_buffer_to_high_memory
+
     mov [boot_info + 64], esi
     mov dword [boot_info + 68], 0
     mov dword [boot_info + 72], KERNEL_LOAD_PHYS
@@ -926,13 +1411,12 @@ load_elf64:
     ret
 
 .bad_header:
-    mov eax, [es:KERNEL_FILE_OFFSET]
+    mov eax, [edi]
     mov [debug_elf_magic], eax
-    movzx eax, byte [es:KERNEL_FILE_OFFSET + 4]
+    movzx eax, byte [edi + 4]
     mov [debug_elf_class], eax
-    movzx eax, word [es:KERNEL_FILE_OFFSET + 18]
+    movzx eax, word [edi + 18]
     mov [debug_elf_machine], eax
-    pop es
     mov si, msg_elf_bad_header
     call puts_serial_only
     mov si, msg_elf_magic
@@ -971,7 +1455,18 @@ enter_long_mode:
 
     mov dword [PAGE_TABLE_PML4], PAGE_TABLE_PDPT | 0x03
     mov dword [PAGE_TABLE_PDPT], PAGE_TABLE_PD | 0x03
-    mov dword [PAGE_TABLE_PD], 0x00000083
+    xor ebx, ebx
+    mov di, PAGE_TABLE_PD
+    mov cx, 64
+
+.map_loop:
+    mov eax, ebx
+    or eax, 0x83
+    mov [di], eax
+    mov dword [di + 4], 0
+    add ebx, 0x200000
+    add di, 8
+    loop .map_loop
 
     lgdt [gdt_descriptor]
 
@@ -994,8 +1489,9 @@ enter_long_mode:
     jmp 0x08:long_mode_entry
 
 read_lba:
-    push ax
-    push dx
+    push ds
+    push es
+    pushad
     mov [disk_packet.sector_count], cx
     mov [disk_packet.buffer_offset], bx
     mov [disk_packet.buffer_segment], es
@@ -1005,8 +1501,9 @@ read_lba:
     mov dl, [boot_drive]
     mov ah, 0x42
     int 0x13
-    pop dx
-    pop ax
+    popad
+    pop es
+    pop ds
     ret
 
 read_line:
@@ -1219,13 +1716,28 @@ msg_autoboot db 'Press any key for shell. Autoboot in 15 seconds...', 13, 10, 0
 msg_autobooting db 'Autobooting kernel...', 13, 10, 0
 msg_shell db 'Interactive shell enabled.', 13, 10, 0
 msg_kernel_load db 'Loading /BOOT/KERNEL.ELF...', 13, 10, 0
+msg_wad_load db 'Loading /DOOM2.WAD...', 13, 10, 0
 msg_kernel_jump db 'Entering 64-bit kernel.', 13, 10, 0
 msg_kernel_fail db 'Kernel load failed.', 13, 10, 0
 msg_kernel_too_large db 'Kernel file exceeds stage2 buffer.', 13, 10, 0
+msg_wad_not_found db 'DOOM2.WAD not found in the FAT32 root.', 13, 10, 0
+msg_wad_dir_read_fail db 'Could not read the FAT32 root while locating DOOM2.WAD.', 13, 10, 0
+msg_wad_fat_fail db 'FAT32 chain traversal failed while locating DOOM2.WAD.', 13, 10, 0
+msg_wad_not_ready db 'DOOM2.WAD was not prepared before copy.', 13, 10, 0
+msg_wad_metadata_fail db 'DOOM2.WAD metadata is missing from the image.', 13, 10, 0
+msg_wad_invalid db 'DOOM2.WAD header is invalid.', 13, 10, 0
+msg_wad_no_mem db 'No memory region below 128 MiB for DOOM2.WAD.', 13, 10, 0
+msg_wad_fail db 'Failed to copy DOOM2.WAD into memory.', 13, 10, 0
 msg_step_fat_ready db 'stage2: FAT ready', 13, 10, 0
 msg_step_kernel_found db 'stage2: kernel located', 13, 10, 0
+msg_step_kernel_copy_start db 'stage2: kernel copy start', 13, 10, 0
+msg_step_wad_found db 'stage2: DOOM2.WAD located', 13, 10, 0
 msg_step_file_loaded db 'stage2: kernel file copied', 13, 10, 0
+msg_step_wad_loaded db 'stage2: DOOM2.WAD copied', 13, 10, 0
+msg_wad_copying db 'Copying /DOOM2.WAD to RAM', 13, 10, 0
 msg_step_elf_loaded db 'stage2: ELF segments loaded', 13, 10, 0
+msg_step_copy_sector db 'stage2: sector copy entered', 13, 10, 0
+msg_step_copy_unreal db 'stage2: unreal mode active', 13, 10, 0
 msg_elf_bad_header db 'stage2: ELF header rejected', 13, 10, 0
 msg_elf_magic db 'stage2: magic 0x', 0
 msg_elf_class db 'stage2: class 0x', 0
@@ -1257,6 +1769,7 @@ cmd_boot db 'BOOT', 0
 cmd_reboot db 'REBOOT', 0
 name_boot_dir db 'BOOT       '
 name_kernel_file db 'KERNEL  ELF'
+name_wad_file db 'DOOM2   WAD'
 
 boot_drive db 0
 bytes_per_sector dw 0
@@ -1279,17 +1792,37 @@ search_cluster dd 0
 found_cluster dd 0
 found_size dd 0
 kernel_file_size dd 0
+wad_start_lba dd 0
+wad_file_size dd 0
 bytes_remaining dd 0
+copy_bytes dd 0
 next_cluster_result dd 0
+wad_current_lba dd 0
 load_cluster dd 0
+wad_load_phys dd 0
+high_copy_dest dd 0
+low_copy_source dd 0
 debug_elf_magic dd 0
 debug_elf_class dd 0
 debug_elf_machine dd 0
 search_name_ptr dw 0
+wad_progress_sectors dw 0
+fat32_find_error db 0
+copy_debug_state db 0
+align 8
 
 align 8
 boot_info:
     times BOOTINFO_SIZE db 0
+
+align 16
+unreal_gdt:
+    dq 0
+    dq 0x00009A000000FFFF
+    dq 0x00CF92000000FFFF
+unreal_gdt_descriptor:
+    dw unreal_gdt_descriptor - unreal_gdt - 1
+    dd unreal_gdt
 
 align 16
 gdt64:
@@ -1310,7 +1843,7 @@ long_mode_entry:
     mov gs, ax
     mov rsp, 0x90000
     mov rdi, boot_info
-    mov rax, KERNEL_LOAD_PHYS
+    mov rax, [boot_info + 64]
     jmp rax
 
 [BITS 16]

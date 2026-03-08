@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define BOOTINFO_MAGIC 0x31544942u
-#define BOOTINFO_VERSION 1u
+#define BOOTINFO_VERSION 2u
 
 typedef struct __attribute__((packed)) MemoryMapEntry {
     uint64_t base;
@@ -31,6 +31,8 @@ typedef struct __attribute__((packed)) BootInfo {
     uint64_t kernel_load_base;
     uint64_t kernel_file_size;
     uint64_t acpi_rsdp;
+    uint64_t wad_base;
+    uint64_t wad_size;
 } BootInfo;
 
 #endif
